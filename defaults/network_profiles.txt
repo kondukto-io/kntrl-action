@@ -1,0 +1,30 @@
+      - process: "npm"
+        allowed_hosts:
+          - "registry.npmjs.org"
+          - ".npmjs.org"
+          - ".npmjs.com"
+      - process: "node"
+        allowed_hosts:
+          - "registry.npmjs.org"
+          - ".npmjs.org"
+          - ".npmjs.com"
+      - process: "pip"
+        allowed_hosts:
+          - "pypi.org"
+          - "files.pythonhosted.org"
+          - ".pypi.org"
+      - process: "pip3"
+        allowed_hosts:
+          - "pypi.org"
+          - "files.pythonhosted.org"
+          - ".pypi.org"
+      - process: "python"
+        allowed_hosts:
+          - "pypi.org"
+          - "files.pythonhosted.org"
+          - ".pypi.org"
+      - process: "python3"
+        allowed_hosts:
+          - "pypi.org"
+          - "files.pythonhosted.org"
+          - ".pypi.org"

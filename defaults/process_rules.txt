@@ -1,0 +1,44 @@
+      - process: "curl"
+        ancestors: ["npm"]
+      - process: "curl"
+        ancestors: ["node"]
+      - process: "wget"
+        ancestors: ["npm"]
+      - process: "wget"
+        ancestors: ["node"]
+      - process: "curl"
+        ancestors: ["pip"]
+      - process: "curl"
+        ancestors: ["pip3"]
+      - process: "wget"
+        ancestors: ["pip"]
+      - process: "wget"
+        ancestors: ["pip3"]
+      - process: "bash"
+        ancestors: ["npm"]
+      - process: "sh"
+        ancestors: ["npm"]
+      - process: "bash"
+        ancestors: ["node"]
+      - process: "sh"
+        ancestors: ["node"]
+      - process: "python"
+        ancestors: ["npm"]
+      - process: "python3"
+        ancestors: ["npm"]
+      - process: "perl"
+        ancestors: ["npm"]
+      - process: "ruby"
+        ancestors: ["npm"]
+      - process: "nc"
+        ancestors: ["npm"]
+      - process: "nc"
+        ancestors: ["pip"]
+      - process: "ncat"
+        ancestors: ["npm"]
+      - process: "ncat"
+        ancestors: ["pip"]
+      - process: "socat"
+        ancestors: ["npm"]
+      - process: "socat"
+        ancestors: ["pip"]

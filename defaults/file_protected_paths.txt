@@ -1,0 +1,5 @@
+      - "/etc/sudoers"
+      - "/etc/sudoers.d/"
+      - "/etc/passwd"
+      - "/etc/shadow"
+      - "/root/.ssh/authorized_keys"

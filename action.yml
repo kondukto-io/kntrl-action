@@ -1,0 +1,459 @@
+name: "kntrl - Runtime Security for CI/CD"
+description: "eBPF-based runtime security agent that monitors and enforces network, process, DNS, and file policies in GitHub Actions workflows"
+author: "Invicti / Kondukto"
+
+branding:
+  icon: "shield"
+  color: "blue"
+
+inputs:
+  # ─────────────────────────────────────────────
+  # General
+  # ─────────────────────────────────────────────
+  mode:
+    description: "Operating mode: 'monitor' (log only) or 'trace' (enforce/block)"
+    required: false
+    default: "monitor"
+
+  kntrl_version:
+    description: "kntrl release version to install (e.g. 'v0.5.0'). Defaults to 'latest'."
+    required: false
+    default: "v0.1.11"
+
+  # ─────────────────────────────────────────────
+  # Cloud (optional)
+  # ─────────────────────────────────────────────
+  api_url:
+    description: "kntrl Cloud API URL for centralized reporting"
+    required: false
+    default: ""
+
+  api_key:
+    description: "kntrl Cloud API key for authentication"
+    required: false
+    default: ""
+
+  # ─────────────────────────────────────────────
+  # Default rules toggles
+  # ─────────────────────────────────────────────
+  enable_default_network_rules:
+    description: "Enable built-in network allowlist (npm, PyPI, GitHub, CDN hosts)"
+    required: false
+    default: "true"
+
+  enable_default_process_rules:
+    description: "Enable built-in process blocking (blocked chains and executables)"
+    required: false
+    default: "true"
+
+  enable_default_dns_rules:
+    description: "Enable built-in DNS server allowlist (Google, Cloudflare)"
+    required: false
+    default: "true"
+
+  enable_default_file_rules:
+    description: "Enable built-in file monitoring (secrets, credentials, SSH keys)"
+    required: false
+    default: "true"
+
+  enable_default_supply_chain_rego:
+    description: "Enable built-in OPA supply chain protection rules (exfil domain blocklist, metadata blocking, registry lockdown)"
+    required: false
+    default: "true"
+
+  # ─────────────────────────────────────────────
+  # Network overrides
+  # ─────────────────────────────────────────────
+  allowed_hosts:
+    description: "Additional allowed hostnames (comma-separated, e.g. '.example.com,api.myservice.io')"
+    required: false
+    default: ""
+
+  allowed_ips:
+    description: "Additional allowed IP addresses or CIDRs (comma-separated, e.g. '10.0.0.0/8,203.0.113.5')"
+    required: false
+    default: ""
+
+  allow_local_ranges:
+    description: "Allow RFC 1918 private ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)"
+    required: false
+    default: "true"
+
+  allow_github_meta:
+    description: "Dynamically allow GitHub Actions infrastructure IPs from api.github.com/meta"
+    required: false
+    default: "true"
+
+  allow_metadata:
+    description: "Allow cloud metadata endpoints (169.254.169.254, 168.63.129.16)"
+    required: false
+    default: "false"
+
+  # ─────────────────────────────────────────────
+  # Process overrides
+  # ─────────────────────────────────────────────
+  extra_blocked_executables:
+    description: "Additional executables to block (comma-separated, e.g. 'nmap,masscan')"
+    required: false
+    default: ""
+
+  # ─────────────────────────────────────────────
+  # File overrides
+  # ─────────────────────────────────────────────
+  extra_monitored_paths:
+    description: "Additional file paths to monitor (comma-separated, e.g. '/app/secrets/,/.env')"
+    required: false
+    default: ""
+
+  extra_protected_paths:
+    description: "Additional file paths to protect from writes (comma-separated)"
+    required: false
+    default: ""
+
+  extra_monitored_env_vars:
+    description: "Additional environment variables to monitor (comma-separated, e.g. 'MY_SECRET,DB_PASSWORD')"
+    required: false
+    default: ""
+
+  # ─────────────────────────────────────────────
+  # Custom rules
+  # ─────────────────────────────────────────────
+  custom_rules_file:
+    description: "Path to a custom YAML rules file (merged with defaults)"
+    required: false
+    default: ""
+
+  custom_rules_dir:
+    description: "Path to a directory containing custom .yaml and/or .rego files (merged with defaults)"
+    required: false
+    default: ""
+
+  custom_rego_file:
+    description: "Path to a custom .rego file to include alongside defaults"
+    required: false
+    default: ""
+
+  # ─────────────────────────────────────────────
+  # Network profiles (JSON)
+  # ─────────────────────────────────────────────
+  network_profiles:
+    description: |
+      JSON array of per-process network profiles. Example:
+      [{"process":"maven","allowed_hosts":["repo1.maven.org",".maven.org"]}]
+    required: false
+    default: ""
+
+  # ─────────────────────────────────────────────
+  # Process blocked chains (JSON)
+  # ─────────────────────────────────────────────
+  extra_blocked_chains:
+    description: |
+      JSON array of additional process blocked chains. Example:
+      [{"process":"curl","ancestors":["maven"]},{"process":"wget","ancestors":["gradle"]}]
+    required: false
+    default: ""
+
+outputs:
+  report_file:
+    description: "Path to the kntrl JSON report file"
+    value: ${{ steps.kntrl-start.outputs.report_file }}
+
+  exit_code:
+    description: "kntrl exit code (non-zero if policy violations were found in trace mode)"
+    value: ${{ steps.kntrl-stop.outputs.exit_code }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install kntrl
+      id: kntrl-install
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        VERSION="${{ inputs.kntrl_version }}"
+        ARCH="$(uname -m)"
+        case "${ARCH}" in
+          x86_64)  ARCH_SUFFIX="amd64" ;;
+          aarch64) ARCH_SUFFIX="arm64" ;;
+          *)       echo "::error::Unsupported architecture: ${ARCH}"; exit 1 ;;
+        esac
+
+        if [ "${VERSION}" = "latest" ]; then
+          DOWNLOAD_URL="https://github.com/kondukto-io/kntrl/releases/latest/download/kntrl.${ARCH_SUFFIX}"
+        else
+          DOWNLOAD_URL="https://github.com/kondukto-io/kntrl/releases/download/${VERSION}/kntrl.${ARCH_SUFFIX}"
+        fi
+
+        echo "::group::Installing kntrl (${VERSION}, ${ARCH_SUFFIX})"
+        sudo curl -fsSL -o /usr/local/bin/kntrl "${DOWNLOAD_URL}"
+        sudo chmod +x /usr/local/bin/kntrl
+        echo "kntrl installed: $(kntrl --version 2>&1 || true)"
+        echo "::endgroup::"
+
+    - name: Build rules directory
+      id: kntrl-rules
+      shell: bash
+      env:
+        INPUT_MODE: ${{ inputs.mode }}
+        INPUT_ENABLE_DEFAULT_NETWORK: ${{ inputs.enable_default_network_rules }}
+        INPUT_ENABLE_DEFAULT_PROCESS: ${{ inputs.enable_default_process_rules }}
+        INPUT_ENABLE_DEFAULT_DNS: ${{ inputs.enable_default_dns_rules }}
+        INPUT_ENABLE_DEFAULT_FILE: ${{ inputs.enable_default_file_rules }}
+        INPUT_ENABLE_DEFAULT_REGO: ${{ inputs.enable_default_supply_chain_rego }}
+        INPUT_ALLOWED_HOSTS: ${{ inputs.allowed_hosts }}
+        INPUT_ALLOWED_IPS: ${{ inputs.allowed_ips }}
+        INPUT_ALLOW_LOCAL_RANGES: ${{ inputs.allow_local_ranges }}
+        INPUT_ALLOW_GITHUB_META: ${{ inputs.allow_github_meta }}
+        INPUT_ALLOW_METADATA: ${{ inputs.allow_metadata }}
+        INPUT_EXTRA_BLOCKED_EXECUTABLES: ${{ inputs.extra_blocked_executables }}
+        INPUT_EXTRA_MONITORED_PATHS: ${{ inputs.extra_monitored_paths }}
+        INPUT_EXTRA_PROTECTED_PATHS: ${{ inputs.extra_protected_paths }}
+        INPUT_EXTRA_MONITORED_ENV_VARS: ${{ inputs.extra_monitored_env_vars }}
+        INPUT_CUSTOM_REGO_FILE: ${{ inputs.custom_rego_file }}
+        INPUT_NETWORK_PROFILES: ${{ inputs.network_profiles }}
+        INPUT_EXTRA_BLOCKED_CHAINS: ${{ inputs.extra_blocked_chains }}
+      run: |
+        set -euo pipefail
+
+        RULES_DIR="/tmp/kntrl-rules"
+        mkdir -p "${RULES_DIR}"
+        ACTION_DIR="${GITHUB_ACTION_PATH}"
+        RULES_FILE="${RULES_DIR}/rules.yaml"
+
+        # ── Helper: convert comma-separated string to YAML list items ──
+        csv_to_yaml() {
+          local csv="$1" indent="$2"
+          IFS=',' read -ra items <<< "${csv}"
+          for item in "${items[@]}"; do
+            item="$(echo "${item}" | xargs)"
+            [ -n "${item}" ] && echo "${indent}- \"${item}\""
+          done
+        }
+
+        # ══════════════════════════════════════════
+        # Generate rules.yaml
+        # ══════════════════════════════════════════
+        {
+          echo 'version: "1"'
+          echo "mode: ${INPUT_MODE}"
+          echo "rules:"
+
+          # ── Network section ──
+          echo "  network:"
+
+          if [ "${INPUT_ENABLE_DEFAULT_NETWORK}" = "true" ] || [ -n "${INPUT_ALLOWED_HOSTS}" ]; then
+            echo "    allowed_hosts:"
+            if [ "${INPUT_ENABLE_DEFAULT_NETWORK}" = "true" ]; then
+              cat "${ACTION_DIR}/defaults/network_hosts.txt"
+            fi
+            if [ -n "${INPUT_ALLOWED_HOSTS}" ]; then
+              csv_to_yaml "${INPUT_ALLOWED_HOSTS}" "      "
+            fi
+          fi
+
+          if [ "${INPUT_ENABLE_DEFAULT_NETWORK}" = "true" ] || [ -n "${INPUT_ALLOWED_IPS}" ]; then
+            echo "    allowed_ips:"
+            if [ "${INPUT_ENABLE_DEFAULT_NETWORK}" = "true" ]; then
+              echo '      - "10.0.0.0/8"'
+              echo '      - "172.16.0.0/12"'
+              echo '      - "192.168.0.0/16"'
+            fi
+            if [ -n "${INPUT_ALLOWED_IPS}" ]; then
+              csv_to_yaml "${INPUT_ALLOWED_IPS}" "      "
+            fi
+          fi
+
+          echo "    allow_local_ranges: ${INPUT_ALLOW_LOCAL_RANGES}"
+          echo "    allow_github_meta: ${INPUT_ALLOW_GITHUB_META}"
+          echo "    allow_metadata: ${INPUT_ALLOW_METADATA}"
+
+          # -- Network profiles --
+          if [ "${INPUT_ENABLE_DEFAULT_NETWORK}" = "true" ] || [ -n "${INPUT_NETWORK_PROFILES}" ]; then
+            echo "    profiles:"
+            if [ "${INPUT_ENABLE_DEFAULT_NETWORK}" = "true" ]; then
+              cat "${ACTION_DIR}/defaults/network_profiles.txt"
+            fi
+            if [ -n "${INPUT_NETWORK_PROFILES}" ]; then
+              python3 -c "
+        import json, sys
+        for p in json.loads(sys.argv[1]):
+            print(f'      - process: \"{p[\"process\"]}\"')
+            print('        allowed_hosts:')
+            for h in p.get('allowed_hosts', []):
+                print(f'          - \"{h}\"')
+        " "${INPUT_NETWORK_PROFILES}"
+            fi
+          fi
+
+          # ── Process section ──
+          if [ "${INPUT_ENABLE_DEFAULT_PROCESS}" = "true" ] || [ -n "${INPUT_EXTRA_BLOCKED_EXECUTABLES}" ] || [ -n "${INPUT_EXTRA_BLOCKED_CHAINS}" ]; then
+            echo "  process:"
+            echo "    enabled: true"
+
+            # -- Blocked chains --
+            if [ "${INPUT_ENABLE_DEFAULT_PROCESS}" = "true" ] || [ -n "${INPUT_EXTRA_BLOCKED_CHAINS}" ]; then
+              echo "    blocked_chains:"
+              if [ "${INPUT_ENABLE_DEFAULT_PROCESS}" = "true" ]; then
+                cat "${ACTION_DIR}/defaults/process_rules.txt"
+              fi
+              if [ -n "${INPUT_EXTRA_BLOCKED_CHAINS}" ]; then
+                python3 -c "
+        import json, sys
+        for c in json.loads(sys.argv[1]):
+            print(f'      - process: \"{c[\"process\"]}\"')
+            ancestors = ', '.join(f'\"{a}\"' for a in c['ancestors'])
+            print(f'        ancestors: [{ancestors}]')
+        " "${INPUT_EXTRA_BLOCKED_CHAINS}"
+              fi
+            fi
+
+            # -- Blocked executables --
+            echo "    blocked_executables:"
+            if [ "${INPUT_ENABLE_DEFAULT_PROCESS}" = "true" ]; then
+              echo '      - "nc"'
+              echo '      - "ncat"'
+              echo '      - "nmap"'
+              echo '      - "socat"'
+              echo '      - "trufflehog"'
+            fi
+            if [ -n "${INPUT_EXTRA_BLOCKED_EXECUTABLES}" ]; then
+              csv_to_yaml "${INPUT_EXTRA_BLOCKED_EXECUTABLES}" "      "
+            fi
+          fi
+
+          # ── DNS section ──
+          if [ "${INPUT_ENABLE_DEFAULT_DNS}" = "true" ]; then
+            echo "  dns:"
+            echo "    allowed_servers:"
+            echo '      - "8.8.8.8"'
+            echo '      - "8.8.4.4"'
+            echo '      - "1.1.1.1"'
+            echo '      - "1.0.0.1"'
+          fi
+
+          # ── File section ──
+          if [ "${INPUT_ENABLE_DEFAULT_FILE}" = "true" ] || \
+             [ -n "${INPUT_EXTRA_MONITORED_PATHS}" ] || \
+             [ -n "${INPUT_EXTRA_PROTECTED_PATHS}" ] || \
+             [ -n "${INPUT_EXTRA_MONITORED_ENV_VARS}" ]; then
+            echo "  file:"
+            echo "    enabled: true"
+
+            echo "    monitored_paths:"
+            if [ "${INPUT_ENABLE_DEFAULT_FILE}" = "true" ]; then
+              cat "${ACTION_DIR}/defaults/file_monitored_paths.txt"
+            fi
+            if [ -n "${INPUT_EXTRA_MONITORED_PATHS}" ]; then
+              csv_to_yaml "${INPUT_EXTRA_MONITORED_PATHS}" "      "
+            fi
+
+            echo "    protected_paths:"
+            if [ "${INPUT_ENABLE_DEFAULT_FILE}" = "true" ]; then
+              cat "${ACTION_DIR}/defaults/file_protected_paths.txt"
+            fi
+            if [ -n "${INPUT_EXTRA_PROTECTED_PATHS}" ]; then
+              csv_to_yaml "${INPUT_EXTRA_PROTECTED_PATHS}" "      "
+            fi
+
+            echo "    monitored_env_vars:"
+            if [ "${INPUT_ENABLE_DEFAULT_FILE}" = "true" ]; then
+              cat "${ACTION_DIR}/defaults/file_env_vars.txt"
+            fi
+            if [ -n "${INPUT_EXTRA_MONITORED_ENV_VARS}" ]; then
+              csv_to_yaml "${INPUT_EXTRA_MONITORED_ENV_VARS}" "      "
+            fi
+          fi
+
+          echo "webhooks: []"
+
+        } > "${RULES_FILE}"
+
+        # ══════════════════════════════════════════
+        # Copy OPA rego files
+        # ══════════════════════════════════════════
+        if [ "${INPUT_ENABLE_DEFAULT_REGO}" = "true" ]; then
+          cp "${ACTION_DIR}/defaults/supply_chain.rego" "${RULES_DIR}/supply_chain.rego"
+        fi
+
+        if [ -n "${INPUT_CUSTOM_REGO_FILE}" ] && [ -f "${INPUT_CUSTOM_REGO_FILE}" ]; then
+          cp "${INPUT_CUSTOM_REGO_FILE}" "${RULES_DIR}/$(basename "${INPUT_CUSTOM_REGO_FILE}")"
+        fi
+
+        echo "::group::Generated kntrl rules"
+        cat "${RULES_FILE}"
+        echo "---"
+        ls -la "${RULES_DIR}/"
+        echo "::endgroup::"
+
+        echo "rules_dir=${RULES_DIR}" >> "${GITHUB_OUTPUT}"
+
+    - name: Start kntrl
+      id: kntrl-start
+      shell: bash
+      env:
+        INPUT_MODE: ${{ inputs.mode }}
+        INPUT_CUSTOM_RULES_FILE: ${{ inputs.custom_rules_file }}
+        INPUT_CUSTOM_RULES_DIR: ${{ inputs.custom_rules_dir }}
+        INPUT_API_URL: ${{ inputs.api_url }}
+        INPUT_API_KEY: ${{ inputs.api_key }}
+      run: |
+        set -euo pipefail
+
+        RULES_DIR="${{ steps.kntrl-rules.outputs.rules_dir }}"
+        REPORT_FILE="/tmp/kntrl-report.json"
+
+        KNTRL_ARGS=(
+          start
+          --mode "${INPUT_MODE}"
+          --rules-dir "${RULES_DIR}"
+          --output-file-name "${REPORT_FILE}"
+          --daemonize
+        )
+
+        # ── Custom rules file (merged by kntrl) ──
+        if [ -n "${INPUT_CUSTOM_RULES_FILE}" ] && [ -f "${INPUT_CUSTOM_RULES_FILE}" ]; then
+          KNTRL_ARGS+=(--rules-file "${INPUT_CUSTOM_RULES_FILE}")
+        fi
+
+        # ── Custom rules directory (copy contents into rules dir) ──
+        if [ -n "${INPUT_CUSTOM_RULES_DIR}" ] && [ -d "${INPUT_CUSTOM_RULES_DIR}" ]; then
+          cp -r "${INPUT_CUSTOM_RULES_DIR}"/* "${RULES_DIR}/" 2>/dev/null || true
+        fi
+
+        # ── Cloud configuration ──
+        if [ -n "${INPUT_API_URL}" ]; then
+          export KNTRL_API_URL="${INPUT_API_URL}"
+        fi
+        if [ -n "${INPUT_API_KEY}" ]; then
+          export KNTRL_API_KEY="${INPUT_API_KEY}"
+        fi
+
+        echo "::group::Starting kntrl agent"
+        echo "Command: sudo kntrl ${KNTRL_ARGS[*]}"
+        sudo -E kntrl "${KNTRL_ARGS[@]}"
+        echo "kntrl agent started in daemon mode"
+        echo "::endgroup::"
+
+        echo "report_file=${REPORT_FILE}" >> "${GITHUB_OUTPUT}"
+
+    - name: Stop kntrl and collect report
+      id: kntrl-stop
+      if: always()
+      shell: bash
+      run: |
+        set -uo pipefail
+
+        echo "::group::Stopping kntrl agent"
+        EXIT_CODE=0
+        sudo kntrl stop 2>&1 || EXIT_CODE=$?
+        echo "::endgroup::"
+
+        REPORT_FILE="${{ steps.kntrl-start.outputs.report_file }}"
+        if [ -f "${REPORT_FILE}" ]; then
+          echo "::group::kntrl Report Summary"
+          tail -50 "${REPORT_FILE}" 2>/dev/null || true
+          echo "::endgroup::"
+        fi
+
+        echo "exit_code=${EXIT_CODE}" >> "${GITHUB_OUTPUT}"
