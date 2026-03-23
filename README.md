@@ -35,17 +35,22 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # Start kntrl FIRST — it monitors everything that follows
+      # 1. Start kntrl FIRST — it monitors everything that follows
       - uses: kondukto-io/kntrl-action@v1
 
       - uses: actions/checkout@v4
 
       - run: npm install
       - run: npm test
-      # kntrl automatically stops and reports when the job ends
+
+      # 2. Stop kntrl and print the report (always runs, even on failure)
+      - uses: kondukto-io/kntrl-action/stop@v1
+        if: always()
 ```
 
 All built-in rules are enabled by default: network allowlists, process chain blocking, DNS server restrictions, file monitoring, and OPA supply chain protection.
+
+The stop step prints a detailed table of all network connections, DNS queries, process executions, and file access events captured during the job.
 
 ## Enforce mode
 
@@ -55,6 +60,11 @@ Switch from monitoring to active blocking:
 - uses: kondukto-io/kntrl-action@v1
   with:
     mode: trace  # "monitor" (default) = log only, "trace" = enforce/block
+
+# ... your build steps ...
+
+- uses: kondukto-io/kntrl-action/stop@v1
+  if: always()
 ```
 
 ## What the default rules protect against
