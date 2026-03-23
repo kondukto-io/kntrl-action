@@ -404,7 +404,6 @@ runs:
           --mode "${INPUT_MODE}"
           --rules-dir "${RULES_DIR}"
           --output-file-name "${REPORT_FILE}"
-          --daemonize
         )
 
         # ── Custom rules file (merged by kntrl) ──
@@ -425,10 +424,24 @@ runs:
           export KNTRL_API_KEY="${INPUT_API_KEY}"
         fi
 
+        KNTRL_LOG="/tmp/kntrl-daemon.log"
+
         echo "::group::Starting kntrl agent"
         echo "Command: sudo kntrl ${KNTRL_ARGS[*]}"
-        sudo -E kntrl "${KNTRL_ARGS[@]}"
-        echo "kntrl agent started in daemon mode"
+        sudo -E nohup kntrl "${KNTRL_ARGS[@]}" > "${KNTRL_LOG}" 2>&1 &
+        KNTRL_PID=$!
+        echo "${KNTRL_PID}" | sudo tee /var/run/kntrl.pid > /dev/null
+
+        # Wait briefly for kntrl to attach eBPF probes
+        sleep 2
+
+        if kill -0 "${KNTRL_PID}" 2>/dev/null; then
+          echo "kntrl agent started (pid: ${KNTRL_PID})"
+        else
+          echo "::error::kntrl agent failed to start. Log output:"
+          cat "${KNTRL_LOG}" || true
+          exit 1
+        fi
         echo "::endgroup::"
 
         echo "report_file=${REPORT_FILE}" >> "${GITHUB_OUTPUT}"

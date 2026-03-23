@@ -26,7 +26,28 @@ runs:
 
         echo "::group::Stopping kntrl agent"
         EXIT_CODE=0
-        sudo kntrl stop 2>&1 || EXIT_CODE=$?
+
+        # Send SIGTERM to kntrl daemon
+        if [ -f /var/run/kntrl.pid ]; then
+          KNTRL_PID=$(cat /var/run/kntrl.pid)
+          sudo kill "${KNTRL_PID}" 2>/dev/null || true
+          # Wait for graceful shutdown (flushes report)
+          for i in $(seq 1 10); do
+            kill -0 "${KNTRL_PID}" 2>/dev/null || break
+            sleep 0.5
+          done
+          sudo rm -f /var/run/kntrl.pid
+        else
+          sudo kntrl stop 2>&1 || EXIT_CODE=$?
+        fi
+
+        # Show daemon log if it exists
+        KNTRL_LOG="/tmp/kntrl-daemon.log"
+        if [ -f "${KNTRL_LOG}" ] && [ -s "${KNTRL_LOG}" ]; then
+          echo "--- kntrl daemon log ---"
+          cat "${KNTRL_LOG}"
+          echo "--- end daemon log ---"
+        fi
         echo "::endgroup::"
 
         if [ -f "${REPORT_FILE}" ] && [ -s "${REPORT_FILE}" ]; then
