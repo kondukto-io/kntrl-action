@@ -1,11 +1,11 @@
       - process: "curl"
         ancestors: ["npm"]
       - process: "curl"
-        ancestors: ["node"]
+        ancestors: ["npm", "node"]
       - process: "wget"
         ancestors: ["npm"]
       - process: "wget"
-        ancestors: ["node"]
+        ancestors: ["npm", "node"]
       - process: "curl"
         ancestors: ["pip"]
       - process: "curl"
@@ -14,14 +14,6 @@
         ancestors: ["pip"]
       - process: "wget"
         ancestors: ["pip3"]
-      - process: "bash"
-        ancestors: ["npm"]
-      - process: "sh"
-        ancestors: ["npm"]
-      - process: "bash"
-        ancestors: ["node"]
-      - process: "sh"
-        ancestors: ["node"]
       - process: "python"
         ancestors: ["npm"]
       - process: "python3"
