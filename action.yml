@@ -18,7 +18,7 @@ inputs:
   kntrl_version:
     description: "kntrl release version to install (e.g. 'v0.5.0'). Defaults to 'latest'."
     required: false
-    default: "v0.1.12"
+    default: "v0.1.13"
 
   # ─────────────────────────────────────────────
   # Cloud (optional)
