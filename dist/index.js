@@ -28220,7 +28220,7 @@ exports.CHECKSUMS = void 0;
  */
 exports.CHECKSUMS = {
     "v0.2.1": {
-        amd64: "5bafe7edf0d4283dabf0c1a0e394c1a5a027683a08935f5fa6fc78beda37a219",
+        amd64: "7674b2b1e2d27770dc5d61657289de47b4e92e13315d405f8f16e66cea9c43f3",
     },
 };
 
