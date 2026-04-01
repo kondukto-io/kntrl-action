@@ -15,6 +15,6 @@
  */
 export const CHECKSUMS: Record<string, Record<string, string>> = {
   "v0.2.1": {
-    amd64: "7674b2b1e2d27770dc5d61657289de47b4e92e13315d405f8f16e66cea9c43f3",
+    amd64: "78087ccfed81ad0cc53ab4a261ffd1218e12fb9a8fc54c2f6db55424eee16714",
   },
 };
