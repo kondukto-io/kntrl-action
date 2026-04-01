@@ -28203,6 +28203,21 @@ module.exports = {
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.CHECKSUMS = void 0;
+/**
+ * checksums.ts — Pinned SHA256 checksums for kntrl binary releases.
+ *
+ * When a user pins kntrl_version to a known version (e.g. "v0.2.1"), the install
+ * step verifies the downloaded binary's SHA256 against this map. This prevents
+ * supply-chain attacks where a release binary is tampered with after publication.
+ *
+ * Structure: { "vX.Y.Z": { "amd64": "<sha256>", "arm64": "<sha256>" } }
+ *
+ * When adding a new release:
+ *   1. Download the binary: curl -fsSL -o kntrl.amd64 https://github.com/kondukto-io/kntrl/releases/download/vX.Y.Z/kntrl.amd64
+ *   2. Compute hash:        shasum -a 256 kntrl.amd64
+ *   3. Add entry below
+ *   4. Rebuild: npm run build
+ */
 exports.CHECKSUMS = {
     "v0.2.1": {
         amd64: "cd62611ea0e3a26a9c2a3a185d9d5ebb09b87c447427a254aa2884763dba4522",
@@ -28217,6 +28232,25 @@ exports.CHECKSUMS = {
 
 "use strict";
 
+/**
+ * daemon.ts — Start and stop the kntrl eBPF agent as a background daemon.
+ *
+ * Start flow:
+ *   1. Copy user's custom rules directory into the rules dir (if provided)
+ *   2. Spawn `sudo -E kntrl start ...` as a detached background process
+ *   3. Redirect stdout/stderr to a log file for later inspection
+ *   4. Write the PID to /var/run/kntrl.pid for the stop step
+ *   5. Wait 2 seconds for eBPF probes to attach, then verify the process is alive
+ *
+ * Stop flow:
+ *   1. Read PID from /var/run/kntrl.pid
+ *   2. Send SIGTERM for graceful shutdown (kntrl flushes the report file on exit)
+ *   3. Poll up to 5 seconds for the process to exit
+ *   4. Clean up PID file and print daemon log
+ *
+ * The daemon runs with `sudo -E` to preserve environment variables (KNTRL_API_URL,
+ * KNTRL_API_KEY) while gaining root privileges needed for eBPF operations.
+ */
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
     var desc = Object.getOwnPropertyDescriptor(m, k);
@@ -28257,15 +28291,30 @@ const core = __importStar(__nccwpck_require__(7484));
 const exec = __importStar(__nccwpck_require__(5236));
 const child_process_1 = __nccwpck_require__(5317);
 const fs = __importStar(__nccwpck_require__(9896));
+/** PID file path — shared between start and stop steps via the filesystem. */
 const PID_FILE = "/var/run/kntrl.pid";
+/** Daemon log file — captured stdout/stderr from the kntrl process. */
 const LOG_FILE = "/tmp/kntrl-daemon.log";
+/**
+ * Start the kntrl agent as a detached background daemon.
+ *
+ * @param mode         - "monitor" (log only) or "trace" (enforce/block)
+ * @param rulesDir     - Path to the generated rules directory
+ * @param reportFile   - Path where kntrl writes its JSONL event report
+ * @param customRulesFile - Optional: user-provided YAML rules file to merge
+ * @param customRulesDir  - Optional: directory of extra .yaml/.rego files to include
+ * @param apiUrl       - Optional: kntrl Cloud API URL
+ * @param apiKey       - Optional: kntrl Cloud API key
+ */
 async function startDaemon(mode, rulesDir, reportFile, customRulesFile, customRulesDir, apiUrl, apiKey) {
-    // Copy custom rules dir contents into rules dir
+    // Merge user's custom rules directory contents into the generated rules dir
     if (customRulesDir && fs.existsSync(customRulesDir)) {
         await exec.exec("cp", ["-r", `${customRulesDir}/.`, rulesDir], {
             ignoreReturnCode: true,
         });
     }
+    // Build the sudo + kntrl command arguments
+    // sudo -E preserves env vars (needed for KNTRL_API_URL/KEY)
     const kntrlArgs = [
         "-E",
         "kntrl",
@@ -28277,9 +28326,11 @@ async function startDaemon(mode, rulesDir, reportFile, customRulesFile, customRu
         "--output-file-name",
         reportFile,
     ];
+    // Append optional --rules-file flag for merging custom YAML rules
     if (customRulesFile && fs.existsSync(customRulesFile)) {
         kntrlArgs.push("--rules-file", customRulesFile);
     }
+    // Forward Cloud API credentials via environment if configured
     const env = { ...process.env };
     if (apiUrl)
         env.KNTRL_API_URL = apiUrl;
@@ -28287,6 +28338,8 @@ async function startDaemon(mode, rulesDir, reportFile, customRulesFile, customRu
         env.KNTRL_API_KEY = apiKey;
     core.startGroup("Starting kntrl agent");
     core.info(`Command: sudo ${kntrlArgs.join(" ")}`);
+    // Spawn as a detached process so it outlives this Node.js action step.
+    // stdout/stderr go to a log file for post-mortem debugging.
     const logFd = fs.openSync(LOG_FILE, "w");
     const child = (0, child_process_1.spawn)("sudo", kntrlArgs, {
         detached: true,
@@ -28297,15 +28350,17 @@ async function startDaemon(mode, rulesDir, reportFile, customRulesFile, customRu
     if (!pid) {
         throw new Error("Failed to spawn kntrl process");
     }
+    // Detach from the child so Node.js can exit without killing kntrl
     child.unref();
     fs.closeSync(logFd);
-    // Write PID file
+    // Write PID file (used by the stop step to send SIGTERM)
     await exec.exec("sudo", ["bash", "-c", `echo ${pid} > ${PID_FILE}`]);
-    // Wait for eBPF probes to attach
+    // Wait for eBPF probes to attach before proceeding with the workflow.
+    // kntrl needs ~1-2 seconds to set up tracepoints; we wait 2s to be safe.
     await new Promise((resolve) => setTimeout(resolve, 2000));
-    // Verify process is alive
+    // Verify the daemon is still running (didn't crash during probe setup)
     try {
-        process.kill(pid, 0);
+        process.kill(pid, 0); // signal 0 = just check if process exists
         core.info(`kntrl agent started (pid: ${pid})`);
     }
     catch {
@@ -28317,10 +28372,15 @@ async function startDaemon(mode, rulesDir, reportFile, customRulesFile, customRu
     }
     core.endGroup();
 }
+/**
+ * Stop the kntrl daemon and return its exit code.
+ * Sends SIGTERM for graceful shutdown so kntrl can flush the report file.
+ */
 async function stopDaemon() {
     let exitCode = 0;
     core.startGroup("Stopping kntrl agent");
     if (fs.existsSync(PID_FILE)) {
+        // Read the PID written by startDaemon
         let pid;
         try {
             const result = await exec.getExecOutput("sudo", ["cat", PID_FILE]);
@@ -28330,21 +28390,25 @@ async function stopDaemon() {
             pid = "";
         }
         if (pid) {
+            // Send SIGTERM for graceful shutdown
             await exec.exec("sudo", ["kill", pid], { ignoreReturnCode: true });
-            // Wait for graceful shutdown
+            // Poll up to 5 seconds waiting for the process to exit.
+            // kntrl flushes the JSONL report file on SIGTERM before exiting.
             for (let i = 0; i < 10; i++) {
                 try {
                     await exec.exec("kill", ["-0", pid], { ignoreReturnCode: false });
                     await new Promise((resolve) => setTimeout(resolve, 500));
                 }
                 catch {
-                    break;
+                    break; // Process is gone — shutdown complete
                 }
             }
         }
+        // Clean up PID file
         await exec.exec("sudo", ["rm", "-f", PID_FILE], { ignoreReturnCode: true });
     }
     else {
+        // Fallback: no PID file found, try the kntrl stop command directly
         try {
             await exec.exec("sudo", ["kntrl", "stop"]);
         }
@@ -28352,7 +28416,7 @@ async function stopDaemon() {
             exitCode = 1;
         }
     }
-    // Show daemon log
+    // Print daemon log for debugging (visible in the GitHub Actions log)
     if (fs.existsSync(LOG_FILE) && fs.statSync(LOG_FILE).size > 0) {
         core.info("--- kntrl daemon log ---");
         core.info(fs.readFileSync(LOG_FILE, "utf-8"));
@@ -28370,28 +28434,53 @@ async function stopDaemon() {
 
 "use strict";
 
+/**
+ * defaults.ts — Built-in security rule data shipped with the action.
+ *
+ * These constants replace the old .txt files (network_hosts.txt, process_rules.txt, etc.)
+ * that were read at runtime by the bash composite action. By embedding them as typed
+ * constants we get compile-time safety, easier maintenance, and no filesystem dependency.
+ *
+ * Each constant is used by rules.ts when the corresponding "enable_default_*" input is true.
+ * User-supplied extras (from action inputs) are appended after these defaults.
+ */
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.DEFAULT_FILE_ENV_VARS = exports.DEFAULT_FILE_PROTECTED_PATHS = exports.DEFAULT_FILE_MONITORED_PATHS = exports.DEFAULT_DNS_SERVERS = exports.DEFAULT_BLOCKED_EXECUTABLES = exports.DEFAULT_BLOCKED_CHAINS = exports.DEFAULT_NETWORK_PROFILES = exports.DEFAULT_NETWORK_IPS = exports.DEFAULT_NETWORK_HOSTS = void 0;
+// ─────────────────────────────────────────────────────────────────────────────
+// Network — Allowed hosts that CI/CD workflows typically need
+// ─────────────────────────────────────────────────────────────────────────────
+/** Hostnames allowed by default for outbound connections (package registries, GitHub, CDNs). */
 exports.DEFAULT_NETWORK_HOSTS = [
+    // npm / Node.js
     "registry.npmjs.org",
     ".npmjs.org",
     ".npmjs.com",
+    // PyPI / Python
     "pypi.org",
     "files.pythonhosted.org",
     ".pypi.org",
+    // GitHub
     "github.com",
     ".github.com",
     ".githubusercontent.com",
     ".githubassets.com",
     ".actions.githubusercontent.com",
+    // CDNs
     ".cloudflare.com",
     ".fastly.net",
 ];
+/** RFC 1918 private ranges — always included when default network rules are on. */
 exports.DEFAULT_NETWORK_IPS = [
     "10.0.0.0/8",
     "172.16.0.0/12",
     "192.168.0.0/16",
 ];
+/**
+ * Default per-process network profiles.
+ * When active, npm/node may only reach npm registries, pip/python may only reach PyPI.
+ * This prevents supply-chain attacks where a compromised package phones home to an
+ * unexpected domain.
+ */
 exports.DEFAULT_NETWORK_PROFILES = [
     { process: "npm", allowed_hosts: ["registry.npmjs.org", ".npmjs.org", ".npmjs.com"] },
     { process: "node", allowed_hosts: ["registry.npmjs.org", ".npmjs.org", ".npmjs.com"] },
@@ -28400,19 +28489,31 @@ exports.DEFAULT_NETWORK_PROFILES = [
     { process: "python", allowed_hosts: ["pypi.org", "files.pythonhosted.org", ".pypi.org"] },
     { process: "python3", allowed_hosts: ["pypi.org", "files.pythonhosted.org", ".pypi.org"] },
 ];
+/**
+ * Default blocked process chains.
+ * These catch classic supply-chain attack patterns:
+ *   - npm postinstall scripts spawning curl/wget (data exfiltration)
+ *   - pip setup.py spawning network tools
+ *   - Package managers launching unexpected interpreters (python from npm, etc.)
+ *   - Netcat/socat from any package manager context
+ */
 exports.DEFAULT_BLOCKED_CHAINS = [
+    // npm/node → curl/wget (exfiltration via HTTP)
     { process: "curl", ancestors: ["npm"] },
     { process: "curl", ancestors: ["npm", "node"] },
     { process: "wget", ancestors: ["npm"] },
     { process: "wget", ancestors: ["npm", "node"] },
+    // pip → curl/wget
     { process: "curl", ancestors: ["pip"] },
     { process: "curl", ancestors: ["pip3"] },
     { process: "wget", ancestors: ["pip"] },
     { process: "wget", ancestors: ["pip3"] },
+    // npm → unexpected interpreters (cross-ecosystem escalation)
     { process: "python", ancestors: ["npm"] },
     { process: "python3", ancestors: ["npm"] },
     { process: "perl", ancestors: ["npm"] },
     { process: "ruby", ancestors: ["npm"] },
+    // Package managers → raw socket tools
     { process: "nc", ancestors: ["npm"] },
     { process: "nc", ancestors: ["pip"] },
     { process: "ncat", ancestors: ["npm"] },
@@ -28420,31 +28521,41 @@ exports.DEFAULT_BLOCKED_CHAINS = [
     { process: "socat", ancestors: ["npm"] },
     { process: "socat", ancestors: ["pip"] },
 ];
+/** Executables blocked unconditionally regardless of ancestry (dangerous tools). */
 exports.DEFAULT_BLOCKED_EXECUTABLES = [
-    "nc",
-    "ncat",
-    "nmap",
-    "socat",
-    "trufflehog",
+    "nc", // netcat — raw TCP/UDP connections
+    "ncat", // nmap's netcat variant
+    "nmap", // network scanner
+    "socat", // multipurpose relay
+    "trufflehog", // credential scanner (red flag if present in CI)
 ];
+// ─────────────────────────────────────────────────────────────────────────────
+// DNS — Allowed DNS servers
+// ─────────────────────────────────────────────────────────────────────────────
+/** DNS servers allowed by default (Google Public DNS + Cloudflare). */
 exports.DEFAULT_DNS_SERVERS = [
-    "8.8.8.8",
-    "8.8.4.4",
-    "1.1.1.1",
-    "1.0.0.1",
+    "8.8.8.8", // Google
+    "8.8.4.4", // Google
+    "1.1.1.1", // Cloudflare
+    "1.0.0.1", // Cloudflare
 ];
+// ─────────────────────────────────────────────────────────────────────────────
+// File monitoring — Paths and environment variables to watch
+// ─────────────────────────────────────────────────────────────────────────────
+/** File paths monitored for reads (credential files, auth configs, cloud secrets). */
 exports.DEFAULT_FILE_MONITORED_PATHS = [
-    "/.npmrc",
-    "/.pypirc",
-    "/pip.conf",
-    "/.ssh/",
-    "/.aws/",
-    "/.azure/",
-    "/.config/gcloud/",
-    "/var/run/secrets/",
-    "/.kube/config",
-    "/.config/gh/",
+    "/.npmrc", // npm auth token
+    "/.pypirc", // PyPI credentials
+    "/pip.conf", // pip config (may contain index URLs with tokens)
+    "/.ssh/", // SSH keys
+    "/.aws/", // AWS credentials
+    "/.azure/", // Azure credentials
+    "/.config/gcloud/", // GCP credentials
+    "/var/run/secrets/", // Kubernetes mounted secrets
+    "/.kube/config", // Kubernetes config
+    "/.config/gh/", // GitHub CLI auth
 ];
+/** File paths protected from writes (system security files that should never be modified). */
 exports.DEFAULT_FILE_PROTECTED_PATHS = [
     "/etc/sudoers",
     "/etc/sudoers.d/",
@@ -28452,6 +28563,7 @@ exports.DEFAULT_FILE_PROTECTED_PATHS = [
     "/etc/shadow",
     "/root/.ssh/authorized_keys",
 ];
+/** Environment variables monitored for access (secrets, tokens, credentials). */
 exports.DEFAULT_FILE_ENV_VARS = [
     "NPM_TOKEN",
     "NPM_AUTH_TOKEN",
@@ -28479,6 +28591,18 @@ exports.DEFAULT_FILE_ENV_VARS = [
 
 "use strict";
 
+/**
+ * inputs.ts — Parse and validate all GitHub Action inputs.
+ *
+ * Maps the 23 action.yml inputs into a strongly-typed ActionInputs object.
+ * Handles three input formats:
+ *   - Boolean strings ("true"/"false") → parseBool()
+ *   - Comma-separated lists → parseCSV()
+ *   - JSON arrays (network_profiles, extra_blocked_chains) → parseJSON()
+ *
+ * Fallback defaults match action.yml so the action works even if core.getInput()
+ * returns empty (e.g. when testing locally without INPUT_ env vars).
+ */
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
     var desc = Object.getOwnPropertyDescriptor(m, k);
@@ -28515,15 +28639,24 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.getInputs = getInputs;
 const core = __importStar(__nccwpck_require__(7484));
+/**
+ * Split a comma-separated string into trimmed, non-empty tokens.
+ * e.g. " .example.com , api.foo.io , " → [".example.com", "api.foo.io"]
+ */
 function parseCSV(input) {
     return input
         .split(",")
         .map((s) => s.trim())
         .filter(Boolean);
 }
+/** Parse a boolean string — only "true" (case-insensitive) returns true. */
 function parseBool(input) {
     return input.toLowerCase() === "true";
 }
+/**
+ * Parse a JSON array input. On invalid JSON, fails the action via core.setFailed()
+ * and returns an empty array so the rest of the action can still run gracefully.
+ */
 function parseJSON(input, label) {
     if (!input)
         return [];
@@ -28535,6 +28668,11 @@ function parseJSON(input, label) {
         return [];
     }
 }
+/**
+ * Read all action inputs from the GitHub Actions runtime environment.
+ * Each input has a fallback default that mirrors action.yml, so the code
+ * works correctly both in CI and during local testing.
+ */
 function getInputs() {
     return {
         mode: core.getInput("mode") || "monitor",
@@ -28571,6 +28709,22 @@ function getInputs() {
 
 "use strict";
 
+/**
+ * install.ts — Download, verify, cache, and install the kntrl binary.
+ *
+ * Flow:
+ *   1. Check GitHub Actions tool cache for a previously downloaded binary
+ *   2. If not cached, download from github.com/kondukto-io/kntrl/releases
+ *   3. Verify SHA256 checksum against pinned hashes in checksums.ts
+ *      - Known version + known arch → verify or fail
+ *      - "latest" → skip verification with a warning
+ *      - Unknown version → skip verification with a warning
+ *   4. Install to /usr/local/bin/kntrl (requires sudo)
+ *   5. Cache the binary for future workflow runs
+ *
+ * The download URL is hardcoded to the official GitHub releases endpoint —
+ * it is NOT user-controllable, preventing redirect-based attacks.
+ */
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
     var desc = Object.getOwnPropertyDescriptor(m, k);
@@ -28614,6 +28768,10 @@ const crypto = __importStar(__nccwpck_require__(6982));
 const fs = __importStar(__nccwpck_require__(9896));
 const path = __importStar(__nccwpck_require__(6928));
 const checksums_1 = __nccwpck_require__(3275);
+/**
+ * Map Node.js process.arch to the binary suffix used in kntrl releases.
+ * GitHub Actions runners report "x64" for amd64 and "arm64" for arm64.
+ */
 function getArchSuffix() {
     const arch = process.arch;
     switch (arch) {
@@ -28625,13 +28783,19 @@ function getArchSuffix() {
             throw new Error(`Unsupported architecture: ${arch}`);
     }
 }
+/** Compute the SHA256 hex digest of a file on disk. */
 function computeSHA256(filePath) {
     const data = fs.readFileSync(filePath);
     return crypto.createHash("sha256").update(data).digest("hex");
 }
+/**
+ * Download and install the kntrl binary for the given version.
+ * Returns the installed binary path (/usr/local/bin/kntrl).
+ */
 async function installKntrl(version) {
     const archSuffix = getArchSuffix();
     const binaryName = `kntrl.${archSuffix}`;
+    // Build download URL — always points to the official GitHub releases
     let downloadUrl;
     if (version === "latest") {
         downloadUrl = `https://github.com/kondukto-io/kntrl/releases/latest/download/${binaryName}`;
@@ -28640,7 +28804,7 @@ async function installKntrl(version) {
         downloadUrl = `https://github.com/kondukto-io/kntrl/releases/download/${version}/${binaryName}`;
     }
     core.startGroup(`Installing kntrl (${version}, ${archSuffix})`);
-    // Check tool cache first
+    // ── Step 1: Check tool cache for a previously downloaded copy ──
     const cachedPath = tc.find("kntrl", version === "latest" ? "0.0.0" : version);
     if (cachedPath) {
         core.info(`Using cached kntrl from ${cachedPath}`);
@@ -28650,11 +28814,13 @@ async function installKntrl(version) {
         core.endGroup();
         return "/usr/local/bin/kntrl";
     }
+    // ── Step 2: Download the binary ──
     core.info(`Downloading kntrl from ${downloadUrl}`);
     const downloadedPath = await tc.downloadTool(downloadUrl);
-    // SHA256 verification
+    // ── Step 3: SHA256 checksum verification ──
     const versionChecksums = checksums_1.CHECKSUMS[version];
     if (versionChecksums && versionChecksums[archSuffix]) {
+        // Happy path: we have a pinned hash for this exact version + arch
         const expectedHash = versionChecksums[archSuffix];
         const actualHash = computeSHA256(downloadedPath);
         if (actualHash !== expectedHash) {
@@ -28665,22 +28831,24 @@ async function installKntrl(version) {
         core.info(`SHA256 checksum verified: ${actualHash}`);
     }
     else if (version === "latest") {
+        // "latest" is a moving target — we can't pin its hash
         core.warning("Skipping checksum verification for 'latest' version. " +
             "Pin a specific version for reproducible builds.");
     }
     else {
+        // User specified a version we don't have a hash for (newer release?)
         core.warning(`No checksum available for kntrl ${version} (${archSuffix}). ` +
             "Binary integrity could not be verified.");
     }
-    // Install binary
+    // ── Step 4: Install to /usr/local/bin ──
     await io.mkdirP("/usr/local/bin");
     await exec.exec("sudo", ["cp", downloadedPath, "/usr/local/bin/kntrl"]);
     await exec.exec("sudo", ["chmod", "+x", "/usr/local/bin/kntrl"]);
-    // Cache for future runs
+    // ── Step 5: Cache for future runs ──
     const cacheVersion = version === "latest" ? "0.0.0" : version;
     const cacheDir = await tc.cacheFile(downloadedPath, "kntrl", "kntrl", cacheVersion);
     core.info(`Cached kntrl to ${cacheDir}`);
-    // Print version
+    // Print installed version for debugging
     try {
         await exec.exec("kntrl", ["--version"]);
     }
@@ -28699,6 +28867,21 @@ async function installKntrl(version) {
 
 "use strict";
 
+/**
+ * rules.ts — Generate the kntrl rules directory from action inputs.
+ *
+ * This module replaces ~180 lines of bash (echo/cat + python JSON→YAML) from the
+ * old composite action. It builds a typed JavaScript object representing the full
+ * rules.yaml structure, then serializes it using the `yaml` library.
+ *
+ * The generated rules directory contains:
+ *   - rules.yaml          — Main policy file consumed by the kntrl agent
+ *   - supply_chain.rego   — OPA Rego rules for advanced supply-chain protection (optional)
+ *   - <custom>.rego       — User-provided Rego files (optional)
+ *
+ * Each rule section (network, process, dns, file) is only included if at least one
+ * of its defaults is enabled or the user provided override inputs.
+ */
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
     var desc = Object.getOwnPropertyDescriptor(m, k);
@@ -28742,13 +28925,22 @@ const path = __importStar(__nccwpck_require__(6928));
 const core = __importStar(__nccwpck_require__(7484));
 const yaml_1 = __importDefault(__nccwpck_require__(8815));
 const defaults_1 = __nccwpck_require__(7389);
+// ─────────────────────────────────────────────────────────────────────────────
+// Public API
+// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * Build the /tmp/kntrl-rules directory with rules.yaml and optional Rego files.
+ * Returns the directory path to pass to the kntrl daemon's --rules-dir flag.
+ */
 function buildRulesDir(inputs) {
     const rulesDir = "/tmp/kntrl-rules";
     fs.mkdirSync(rulesDir, { recursive: true });
+    // Generate rules.yaml from the typed object
     const rules = buildRulesObject(inputs);
     const rulesFile = path.join(rulesDir, "rules.yaml");
     fs.writeFileSync(rulesFile, yaml_1.default.stringify(rules));
-    // Copy rego files
+    // Copy the bundled supply_chain.rego if enabled
+    // (lives next to the compiled dist/index.js, copied there by the build script)
     if (inputs.enableDefaultSupplyChainRego) {
         const regoSrc = path.join(__dirname, "supply_chain.rego");
         if (fs.existsSync(regoSrc)) {
@@ -28758,9 +28950,11 @@ function buildRulesDir(inputs) {
             core.warning("Default supply_chain.rego not found in action bundle");
         }
     }
+    // Copy user-provided custom Rego file if specified
     if (inputs.customRegoFile && fs.existsSync(inputs.customRegoFile)) {
         fs.copyFileSync(inputs.customRegoFile, path.join(rulesDir, path.basename(inputs.customRegoFile)));
     }
+    // Log the generated rules for debugging
     core.startGroup("Generated kntrl rules");
     core.info(fs.readFileSync(rulesFile, "utf-8"));
     core.info("---");
@@ -28772,6 +28966,13 @@ function buildRulesDir(inputs) {
     core.endGroup();
     return rulesDir;
 }
+// ─────────────────────────────────────────────────────────────────────────────
+// Internal: build the rules object
+// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * Construct the rules.yaml object by merging defaults with user overrides.
+ * Each section is only included if it has at least one enabled setting.
+ */
 function buildRulesObject(inputs) {
     const rules = {
         version: "1",
@@ -28779,100 +28980,116 @@ function buildRulesObject(inputs) {
         rules: {},
         webhooks: [],
     };
-    // Network
-    const hasNetwork = inputs.enableDefaultNetworkRules ||
-        inputs.allowedHosts.length > 0 ||
-        inputs.allowedIps.length > 0;
-    if (hasNetwork) {
-        const network = {};
-        // Allowed hosts
-        const hosts = [];
-        if (inputs.enableDefaultNetworkRules)
-            hosts.push(...defaults_1.DEFAULT_NETWORK_HOSTS);
-        hosts.push(...inputs.allowedHosts);
-        if (hosts.length > 0)
-            network.allowed_hosts = hosts;
-        // Allowed IPs
-        const ips = [];
-        if (inputs.enableDefaultNetworkRules)
-            ips.push(...defaults_1.DEFAULT_NETWORK_IPS);
-        ips.push(...inputs.allowedIps);
-        if (ips.length > 0)
-            network.allowed_ips = ips;
-        network.allow_local_ranges = inputs.allowLocalRanges;
-        network.allow_github_meta = inputs.allowGithubMeta;
-        network.allow_metadata = inputs.allowMetadata;
-        // Profiles
-        const profiles = [];
-        if (inputs.enableDefaultNetworkRules)
-            profiles.push(...defaults_1.DEFAULT_NETWORK_PROFILES);
-        profiles.push(...inputs.networkProfiles);
-        if (profiles.length > 0) {
-            network.profiles = profiles.map((p) => ({
-                process: p.process,
-                allowed_hosts: p.allowed_hosts,
-            }));
-        }
-        rules.rules.network = network;
-    }
-    // Process
-    const hasProcess = inputs.enableDefaultProcessRules ||
-        inputs.extraBlockedExecutables.length > 0 ||
-        inputs.extraBlockedChains.length > 0;
-    if (hasProcess) {
-        const proc = { enabled: true };
-        // Blocked chains
-        const chains = [];
-        if (inputs.enableDefaultProcessRules)
-            chains.push(...defaults_1.DEFAULT_BLOCKED_CHAINS);
-        chains.push(...inputs.extraBlockedChains);
-        if (chains.length > 0) {
-            proc.blocked_chains = chains.map((c) => ({
-                process: c.process,
-                ancestors: c.ancestors,
-            }));
-        }
-        // Blocked executables
-        const execs = [];
-        if (inputs.enableDefaultProcessRules)
-            execs.push(...defaults_1.DEFAULT_BLOCKED_EXECUTABLES);
-        execs.push(...inputs.extraBlockedExecutables);
-        if (execs.length > 0)
-            proc.blocked_executables = execs;
-        rules.rules.process = proc;
-    }
-    // DNS
+    // ── Network rules ──
+    buildNetworkRules(rules, inputs);
+    // ── Process rules ──
+    buildProcessRules(rules, inputs);
+    // ── DNS rules ──
     if (inputs.enableDefaultDnsRules) {
         rules.rules.dns = { allowed_servers: [...defaults_1.DEFAULT_DNS_SERVERS] };
     }
-    // File
+    // ── File rules ──
+    buildFileRules(rules, inputs);
+    return rules;
+}
+/** Populate the network section: allowed hosts, IPs, flags, and per-process profiles. */
+function buildNetworkRules(rules, inputs) {
+    const hasNetwork = inputs.enableDefaultNetworkRules ||
+        inputs.allowedHosts.length > 0 ||
+        inputs.allowedIps.length > 0;
+    if (!hasNetwork)
+        return;
+    const network = {};
+    // Merge default + user-supplied hosts
+    const hosts = [];
+    if (inputs.enableDefaultNetworkRules)
+        hosts.push(...defaults_1.DEFAULT_NETWORK_HOSTS);
+    hosts.push(...inputs.allowedHosts);
+    if (hosts.length > 0)
+        network.allowed_hosts = hosts;
+    // Merge default + user-supplied IPs
+    const ips = [];
+    if (inputs.enableDefaultNetworkRules)
+        ips.push(...defaults_1.DEFAULT_NETWORK_IPS);
+    ips.push(...inputs.allowedIps);
+    if (ips.length > 0)
+        network.allowed_ips = ips;
+    // Boolean flags
+    network.allow_local_ranges = inputs.allowLocalRanges;
+    network.allow_github_meta = inputs.allowGithubMeta;
+    network.allow_metadata = inputs.allowMetadata;
+    // Merge default + user-supplied per-process profiles
+    const profiles = [];
+    if (inputs.enableDefaultNetworkRules)
+        profiles.push(...defaults_1.DEFAULT_NETWORK_PROFILES);
+    profiles.push(...inputs.networkProfiles);
+    if (profiles.length > 0) {
+        network.profiles = profiles.map((p) => ({
+            process: p.process,
+            allowed_hosts: p.allowed_hosts,
+        }));
+    }
+    rules.rules.network = network;
+}
+/** Populate the process section: blocked chains and blocked executables. */
+function buildProcessRules(rules, inputs) {
+    const hasProcess = inputs.enableDefaultProcessRules ||
+        inputs.extraBlockedExecutables.length > 0 ||
+        inputs.extraBlockedChains.length > 0;
+    if (!hasProcess)
+        return;
+    const proc = { enabled: true };
+    // Merge default + user-supplied blocked chains
+    const chains = [];
+    if (inputs.enableDefaultProcessRules)
+        chains.push(...defaults_1.DEFAULT_BLOCKED_CHAINS);
+    chains.push(...inputs.extraBlockedChains);
+    if (chains.length > 0) {
+        proc.blocked_chains = chains.map((c) => ({
+            process: c.process,
+            ancestors: c.ancestors,
+        }));
+    }
+    // Merge default + user-supplied blocked executables
+    const execs = [];
+    if (inputs.enableDefaultProcessRules)
+        execs.push(...defaults_1.DEFAULT_BLOCKED_EXECUTABLES);
+    execs.push(...inputs.extraBlockedExecutables);
+    if (execs.length > 0)
+        proc.blocked_executables = execs;
+    rules.rules.process = proc;
+}
+/** Populate the file section: monitored paths, protected paths, and env vars. */
+function buildFileRules(rules, inputs) {
     const hasFile = inputs.enableDefaultFileRules ||
         inputs.extraMonitoredPaths.length > 0 ||
         inputs.extraProtectedPaths.length > 0 ||
         inputs.extraMonitoredEnvVars.length > 0;
-    if (hasFile) {
-        const file = { enabled: true };
-        const monPaths = [];
-        if (inputs.enableDefaultFileRules)
-            monPaths.push(...defaults_1.DEFAULT_FILE_MONITORED_PATHS);
-        monPaths.push(...inputs.extraMonitoredPaths);
-        if (monPaths.length > 0)
-            file.monitored_paths = monPaths;
-        const protPaths = [];
-        if (inputs.enableDefaultFileRules)
-            protPaths.push(...defaults_1.DEFAULT_FILE_PROTECTED_PATHS);
-        protPaths.push(...inputs.extraProtectedPaths);
-        if (protPaths.length > 0)
-            file.protected_paths = protPaths;
-        const envVars = [];
-        if (inputs.enableDefaultFileRules)
-            envVars.push(...defaults_1.DEFAULT_FILE_ENV_VARS);
-        envVars.push(...inputs.extraMonitoredEnvVars);
-        if (envVars.length > 0)
-            file.monitored_env_vars = envVars;
-        rules.rules.file = file;
-    }
-    return rules;
+    if (!hasFile)
+        return;
+    const file = { enabled: true };
+    // Merge default + user-supplied monitored paths
+    const monPaths = [];
+    if (inputs.enableDefaultFileRules)
+        monPaths.push(...defaults_1.DEFAULT_FILE_MONITORED_PATHS);
+    monPaths.push(...inputs.extraMonitoredPaths);
+    if (monPaths.length > 0)
+        file.monitored_paths = monPaths;
+    // Merge default + user-supplied protected paths
+    const protPaths = [];
+    if (inputs.enableDefaultFileRules)
+        protPaths.push(...defaults_1.DEFAULT_FILE_PROTECTED_PATHS);
+    protPaths.push(...inputs.extraProtectedPaths);
+    if (protPaths.length > 0)
+        file.protected_paths = protPaths;
+    // Merge default + user-supplied monitored env vars
+    const envVars = [];
+    if (inputs.enableDefaultFileRules)
+        envVars.push(...defaults_1.DEFAULT_FILE_ENV_VARS);
+    envVars.push(...inputs.extraMonitoredEnvVars);
+    if (envVars.length > 0)
+        file.monitored_env_vars = envVars;
+    rules.rules.file = file;
 }
 
 
@@ -28883,6 +29100,22 @@ function buildRulesObject(inputs) {
 
 "use strict";
 
+/**
+ * start.ts — Main entry point for the kntrl GitHub Action (start step).
+ *
+ * This is the file compiled by ncc into dist/index.js and referenced
+ * by action.yml's `runs.main` field.
+ *
+ * Execution flow:
+ *   1. Parse all action inputs into a typed object
+ *   2. Download and install the kntrl binary (with SHA256 verification)
+ *   3. Generate the rules directory (rules.yaml + optional Rego files)
+ *   4. Start the kntrl eBPF agent as a background daemon
+ *   5. Export the report file path as an action output
+ *
+ * The daemon stays running in the background while subsequent workflow steps
+ * execute. It is stopped later by the stop action (stop/action.yml).
+ */
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
     var desc = Object.getOwnPropertyDescriptor(m, k);
@@ -28925,13 +29158,14 @@ const daemon_1 = __nccwpck_require__(2087);
 async function run() {
     try {
         const inputs = (0, inputs_1.getInputs)();
-        // Step 1: Install kntrl binary
+        // Step 1: Download, verify, and install the kntrl binary
         await (0, install_1.installKntrl)(inputs.kntrlVersion);
-        // Step 2: Build rules directory
+        // Step 2: Generate rules.yaml and copy Rego files into a temp directory
         const rulesDir = (0, rules_1.buildRulesDir)(inputs);
-        // Step 3: Start kntrl daemon
+        // Step 3: Launch the kntrl eBPF agent in the background
         const reportFile = "/tmp/kntrl-report.json";
         await (0, daemon_1.startDaemon)(inputs.mode, rulesDir, reportFile, inputs.customRulesFile, inputs.customRulesDir, inputs.apiUrl, inputs.apiKey);
+        // Export the report path so the stop step (and downstream jobs) can find it
         core.setOutput("report_file", reportFile);
     }
     catch (error) {

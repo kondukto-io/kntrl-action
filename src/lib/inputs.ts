@@ -1,32 +1,65 @@
+/**
+ * inputs.ts — Parse and validate all GitHub Action inputs.
+ *
+ * Maps the 23 action.yml inputs into a strongly-typed ActionInputs object.
+ * Handles three input formats:
+ *   - Boolean strings ("true"/"false") → parseBool()
+ *   - Comma-separated lists → parseCSV()
+ *   - JSON arrays (network_profiles, extra_blocked_chains) → parseJSON()
+ *
+ * Fallback defaults match action.yml so the action works even if core.getInput()
+ * returns empty (e.g. when testing locally without INPUT_ env vars).
+ */
+
 import * as core from "@actions/core";
 import { BlockedChain, NetworkProfile } from "./defaults";
 
+/** Strongly-typed representation of every action input. */
 export interface ActionInputs {
+  // General
   mode: string;
   kntrlVersion: string;
+
+  // Cloud
   apiUrl: string;
   apiKey: string;
+
+  // Default rule toggles
   enableDefaultNetworkRules: boolean;
   enableDefaultProcessRules: boolean;
   enableDefaultDnsRules: boolean;
   enableDefaultFileRules: boolean;
   enableDefaultSupplyChainRego: boolean;
+
+  // Network overrides
   allowedHosts: string[];
   allowedIps: string[];
   allowLocalRanges: boolean;
   allowGithubMeta: boolean;
   allowMetadata: boolean;
+
+  // Process overrides
   extraBlockedExecutables: string[];
+
+  // File overrides
   extraMonitoredPaths: string[];
   extraProtectedPaths: string[];
   extraMonitoredEnvVars: string[];
+
+  // Custom rules
   customRulesFile: string;
   customRulesDir: string;
   customRegoFile: string;
+
+  // JSON inputs
   networkProfiles: NetworkProfile[];
   extraBlockedChains: BlockedChain[];
 }
 
+/**
+ * Split a comma-separated string into trimmed, non-empty tokens.
+ * e.g. " .example.com , api.foo.io , " → [".example.com", "api.foo.io"]
+ */
 function parseCSV(input: string): string[] {
   return input
     .split(",")
@@ -34,10 +67,15 @@ function parseCSV(input: string): string[] {
     .filter(Boolean);
 }
 
+/** Parse a boolean string — only "true" (case-insensitive) returns true. */
 function parseBool(input: string): boolean {
   return input.toLowerCase() === "true";
 }
 
+/**
+ * Parse a JSON array input. On invalid JSON, fails the action via core.setFailed()
+ * and returns an empty array so the rest of the action can still run gracefully.
+ */
 function parseJSON<T>(input: string, label: string): T[] {
   if (!input) return [];
   try {
@@ -48,6 +86,11 @@ function parseJSON<T>(input: string, label: string): T[] {
   }
 }
 
+/**
+ * Read all action inputs from the GitHub Actions runtime environment.
+ * Each input has a fallback default that mirrors action.yml, so the code
+ * works correctly both in CI and during local testing.
+ */
 export function getInputs(): ActionInputs {
   return {
     mode: core.getInput("mode") || "monitor",
