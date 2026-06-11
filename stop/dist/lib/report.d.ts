@@ -22,3 +22,23 @@
  * to the GitHub Actions log via core.info().
  */
 export declare function renderReport(reportFile: string): void;
+/**
+ * Render a consolidated summary of all blocked events across categories.
+ * This section appears at the bottom of the report so it's the last thing
+ * a developer sees — making it easy to spot what was blocked at a glance.
+ */
+/**
+ * Render the kntrl report as Markdown to GitHub's per-job summary panel
+ * (the file pointed to by $GITHUB_STEP_SUMMARY, surfaced one click below
+ * the run's Checks tab).
+ *
+ * This is a parallel renderer to renderReport() — the ASCII log version
+ * remains the system-of-record for log scraping and offline review; this
+ * version is what reviewers actually see when triaging a PR check failure.
+ *
+ * Re-parses the JSONL file rather than sharing state with renderReport so
+ * the function is safe to call independently and the existing log-render
+ * code path is untouched. Report files are bounded (a few MB at most), so
+ * the double parse is negligible.
+ */
+export declare function writeStepSummary(reportFile: string): Promise<void>;
