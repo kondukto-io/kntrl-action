@@ -28502,13 +28502,30 @@ exports.DEFAULT_NETWORK_PROFILES = [
 ];
 /**
  * Default blocked process chains.
- * These catch classic supply-chain attack patterns:
- *   - npm postinstall scripts spawning curl/wget (data exfiltration)
- *   - pip setup.py spawning network tools
- *   - Package managers launching unexpected interpreters (python from npm, etc.)
- *   - Netcat/socat from any package manager context
+ *
+ * Matching semantics (see kntrl `internal/handlers/tracer/events_process.go`
+ * `isAncestryBlocked`): the leaf process name must equal `process`, AND every
+ * entry in `ancestors` must appear somewhere in the actual ancestry chain
+ * (order-independent set inclusion).
+ *
+ * Reality of the npm process tree: when `npm install` runs a postinstall hook,
+ * the actual ancestry of the leaf is
+ *   `node(npm-cli) → sh -c "node postinstall.js" → node(postinstall) → sh -c "<cmd>" → <leaf>`
+ * — `npm` itself never appears as a `comm` because the npm CLI is a Node script.
+ * Rules below therefore use `node` + `sh` to catch the real-world exfil chain,
+ * and retain the legacy `npm`-only entries as a defense-in-depth alias for
+ * configurations where `npm` shows up via a wrapper script.
  */
 exports.DEFAULT_BLOCKED_CHAINS = [
+    // ─── Real npm postinstall exfil chain: node → sh → <leaf> ───
+    // Catches the typical pattern where a malicious postinstall hook does
+    // `require("child_process").execSync("curl ...")` — execSync spawns `sh`
+    // which spawns the tool, so the leaf's ancestry contains both `node`
+    // (the npm runtime) and `sh` (the execSync default shell).
+    { process: "curl", ancestors: ["node", "sh"] },
+    { process: "wget", ancestors: ["node", "sh"] },
+    { process: "sh", ancestors: ["node", "sh"] }, // nested-shell escape
+    // ─── Legacy npm chains (kept for explicit-npm-wrapper setups) ───
     // npm/node → curl/wget (exfiltration via HTTP)
     { process: "curl", ancestors: ["npm"] },
     { process: "curl", ancestors: ["npm", "node"] },
