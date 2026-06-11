@@ -94,7 +94,7 @@ function parseJSON<T>(input: string, label: string): T[] {
 export function getInputs(): ActionInputs {
   return {
     mode: core.getInput("mode") || "monitor",
-    kntrlVersion: core.getInput("kntrl_version") || "v0.2.1",
+    kntrlVersion: core.getInput("kntrl_version") || "v0.2.2",
     apiUrl: core.getInput("api_url"),
     apiKey: core.getInput("api_key"),
     enableDefaultNetworkRules: parseBool(core.getInput("enable_default_network_rules") || "true"),

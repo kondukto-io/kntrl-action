@@ -290,7 +290,7 @@ Provide a full rules file or directory for complete control:
 | Input | Default | Description |
 |-------|---------|-------------|
 | `mode` | `monitor` | `monitor` (log only) or `trace` (enforce/block) |
-| `kntrl_version` | `v0.1.11` | kntrl release version |
+| `kntrl_version` | `v0.2.2` | kntrl release version |
 | `api_url` | | kntrl Cloud API URL |
 | `api_key` | | kntrl Cloud API key |
 | `enable_default_network_rules` | `true` | Built-in network allowlists |
