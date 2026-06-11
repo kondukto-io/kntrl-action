@@ -291,6 +291,183 @@ function renderFileTable(events: FileEvent[]): void {
  * This section appears at the bottom of the report so it's the last thing
  * a developer sees — making it easy to spot what was blocked at a glance.
  */
+// ─────────────────────────────────────────────────────────────────────────────
+// Markdown step summary
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Render the kntrl report as Markdown to GitHub's per-job summary panel
+ * (the file pointed to by $GITHUB_STEP_SUMMARY, surfaced one click below
+ * the run's Checks tab).
+ *
+ * This is a parallel renderer to renderReport() — the ASCII log version
+ * remains the system-of-record for log scraping and offline review; this
+ * version is what reviewers actually see when triaging a PR check failure.
+ *
+ * Re-parses the JSONL file rather than sharing state with renderReport so
+ * the function is safe to call independently and the existing log-render
+ * code path is untouched. Report files are bounded (a few MB at most), so
+ * the double parse is negligible.
+ */
+export async function writeStepSummary(reportFile: string): Promise<void> {
+  if (!fs.existsSync(reportFile) || fs.statSync(reportFile).size === 0) {
+    return; // nothing to summarize; renderReport() already logged the reason
+  }
+
+  const content = fs.readFileSync(reportFile, "utf-8");
+  const lines = content.split("\n").filter((l) => l.trim());
+
+  const network: NetworkEvent[] = [];
+  const processEvts: ProcessEvent[] = [];
+  const dns: DnsEvent[] = [];
+  const fileEvents: FileEvent[] = [];
+
+  for (const line of lines) {
+    try {
+      const ev = JSON.parse(line);
+      if ("proto" in ev && "daddr" in ev) {
+        network.push(ev);
+      } else if ("event_type" in ev && "ppid" in ev) {
+        processEvts.push(ev);
+      } else if ("dns_server" in ev && "query_domain" in ev) {
+        dns.push(ev);
+      } else if ("filename" in ev && ("policy" in ev || "operation" in ev)) {
+        fileEvents.push(ev);
+      }
+    } catch {
+      // skip malformed lines
+    }
+  }
+
+  if (!network.length && !processEvts.length && !dns.length && !fileEvents.length) {
+    return;
+  }
+
+  const netPass = network.filter((e) => e.policy === "pass").length;
+  const netBlock = network.filter((e) => e.policy === "block").length;
+  const procBlock = processEvts.filter((e) => e.policy === "block").length;
+  const fileBlock = fileEvents.filter((e) => e.blocked).length;
+  const totalBlocked = netBlock + procBlock + fileBlock;
+
+  const blockedNet = network.filter((e) => e.policy === "block");
+  const blockedProc = processEvts.filter((e) => e.policy === "block");
+  const blockedFiles = fileEvents.filter((e) => e.blocked);
+
+  const statusLine =
+    totalBlocked > 0
+      ? `⚠️ **${totalBlocked} event(s) BLOCKED**`
+      : `✅ **All clear — no events blocked**`;
+
+  core.summary
+    .addHeading("🛡️ kntrl Runtime Security Report", 2)
+    .addRaw(statusLine, true)
+    .addBreak()
+    .addTable([
+      [
+        { data: "Category", header: true },
+        { data: "Count", header: true },
+        { data: "Details", header: true },
+      ],
+      ["Network", String(network.length), `pass: ${netPass}, block: ${netBlock}`],
+      ["Process", String(processEvts.length), `blocked: ${procBlock}`],
+      ["DNS", String(dns.length), "—"],
+      ["File", String(fileEvents.length), `blocked: ${fileBlock}`],
+    ]);
+
+  if (blockedNet.length > 0) {
+    core.summary.addDetails(
+      `<strong>Network — ${blockedNet.length} blocked</strong>`,
+      mdTable(
+        ["PID", "Process", "Proto", "Destination", "Domain"],
+        blockedNet.map((ev) => {
+          const domains = (ev.domains || []).join(", ") || "—";
+          const dest = `\`${ev.daddr ?? "?"}:${ev.dport ?? "?"}\``;
+          return [
+            String(ev.pid ?? "?"),
+            "`" + (ev.task_name ?? "?") + "`",
+            ev.proto ?? "?",
+            dest,
+            domains,
+          ];
+        })
+      )
+    );
+  }
+
+  if (blockedProc.length > 0) {
+    core.summary.addDetails(
+      `<strong>Process — ${blockedProc.length} blocked</strong>`,
+      mdTable(
+        ["PID", "Process", "Ancestry chain"],
+        blockedProc.map((ev) => [
+          String(ev.pid ?? "?"),
+          "`" + (ev.comm ?? "?") + "`",
+          (ev.ancestors || []).join(" → ") || "—",
+        ])
+      )
+    );
+  }
+
+  if (blockedFiles.length > 0) {
+    core.summary.addDetails(
+      `<strong>File — ${blockedFiles.length} blocked</strong>`,
+      mdTable(
+        ["PID", "Process", "Filename"],
+        blockedFiles.map((ev) => [
+          String(ev.pid ?? "?"),
+          "`" + (ev.comm ?? "?") + "`",
+          "`" + (ev.filename ?? "?") + "`",
+        ])
+      )
+    );
+  }
+
+  if (dns.length > 0) {
+    const seen = new Set<string>();
+    const unique: DnsEvent[] = [];
+    for (const ev of dns) {
+      const key = `${ev.query_domain || ""}|${ev.dns_server || ""}`;
+      if (ev.query_domain && !seen.has(key)) {
+        seen.add(key);
+        unique.push(ev);
+      }
+    }
+    core.summary.addDetails(
+      `DNS queries (${dns.length} total, ${unique.length} unique)`,
+      mdTable(
+        ["Domain", "DNS Server"],
+        unique.map((ev) => ["`" + (ev.query_domain ?? "?") + "`", ev.dns_server ?? "?"])
+      )
+    );
+  }
+
+  core.summary
+    .addBreak()
+    .addRaw(
+      '<sub>Generated by <a href="https://github.com/kondukto-io/kntrl-action">kntrl-action</a> — see the job log for the full ASCII event stream.</sub>',
+      false
+    );
+
+  await core.summary.write();
+}
+
+/**
+ * Build a GitHub-flavoured Markdown table as a string.
+ * Wrapped in leading/trailing blank lines so GitHub renders the Markdown
+ * even when placed inside an HTML <details> block (addDetails wraps the
+ * content in <details><summary>…</summary>…</details> verbatim).
+ */
+function mdTable(headers: string[], rows: string[][]): string {
+  const header = "| " + headers.join(" | ") + " |";
+  const sep = "| " + headers.map(() => "---").join(" | ") + " |";
+  const body = rows.map((r) => "| " + r.join(" | ") + " |").join("\n");
+  return "\n\n" + [header, sep, body].join("\n") + "\n";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Blocked events summary (ASCII log renderer)
+// ─────────────────────────────────────────────────────────────────────────────
+
 function renderBlockedSummary(
   blockedNet: NetworkEvent[],
   blockedProc: ProcessEvent[],

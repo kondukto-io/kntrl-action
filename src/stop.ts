@@ -15,7 +15,7 @@
 
 import * as core from "@actions/core";
 import { stopDaemon } from "./lib/daemon";
-import { renderReport } from "./lib/report";
+import { renderReport, writeStepSummary } from "./lib/report";
 
 async function run(): Promise<void> {
   try {
@@ -24,8 +24,19 @@ async function run(): Promise<void> {
     // Step 1: Gracefully stop the kntrl daemon (flushes report on exit)
     const exitCode = await stopDaemon();
 
-    // Step 2: Parse JSONL events and render the security report
+    // Step 2: Render the security report into the raw job log (ASCII boxes)
     renderReport(reportFile);
+
+    // Step 3: Mirror the same data as Markdown into the run's Summary panel.
+    // This is the surface PR reviewers actually see — one click from the
+    // Checks tab, with proper tables and collapsible details. Best-effort:
+    // a write failure should not fail the workflow since the ASCII log
+    // already conveys the same content.
+    try {
+      await writeStepSummary(reportFile);
+    } catch (err) {
+      core.warning(`Step summary write failed: ${(err as Error).message}`);
+    }
 
     core.setOutput("exit_code", String(exitCode));
   } catch (error) {
