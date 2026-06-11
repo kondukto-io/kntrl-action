@@ -31,11 +31,19 @@ export interface BlockedChain {
 }
 /**
  * Default blocked process chains.
- * These catch classic supply-chain attack patterns:
- *   - npm postinstall scripts spawning curl/wget (data exfiltration)
- *   - pip setup.py spawning network tools
- *   - Package managers launching unexpected interpreters (python from npm, etc.)
- *   - Netcat/socat from any package manager context
+ *
+ * Matching semantics (see kntrl `internal/handlers/tracer/events_process.go`
+ * `isAncestryBlocked`): the leaf process name must equal `process`, AND every
+ * entry in `ancestors` must appear somewhere in the actual ancestry chain
+ * (order-independent set inclusion).
+ *
+ * Reality of the npm process tree: when `npm install` runs a postinstall hook,
+ * the actual ancestry of the leaf is
+ *   `node(npm-cli) → sh -c "node postinstall.js" → node(postinstall) → sh -c "<cmd>" → <leaf>`
+ * — `npm` itself never appears as a `comm` because the npm CLI is a Node script.
+ * Rules below therefore use `node` + `sh` to catch the real-world exfil chain,
+ * and retain the legacy `npm`-only entries as a defense-in-depth alias for
+ * configurations where `npm` shows up via a wrapper script.
  */
 export declare const DEFAULT_BLOCKED_CHAINS: BlockedChain[];
 /** Executables blocked unconditionally regardless of ancestry (dangerous tools). */
