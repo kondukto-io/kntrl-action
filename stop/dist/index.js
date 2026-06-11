@@ -25774,12 +25774,18 @@ async function startDaemon(mode, rulesDir, reportFile, customRulesFile, customRu
     // Wait for eBPF probes to attach before proceeding with the workflow.
     // kntrl needs ~1-2 seconds to set up tracepoints; we wait 2s to be safe.
     await new Promise((resolve) => setTimeout(resolve, 2000));
-    // Verify the daemon is still running (didn't crash during probe setup)
-    try {
-        process.kill(pid, 0); // signal 0 = just check if process exists
+    // Verify the daemon is still running (didn't crash during probe setup).
+    // We shell out to `sudo kill -0` rather than calling process.kill(pid, 0):
+    // kntrl runs as root via sudo, and a non-root probe of a root-owned pid
+    // returns EPERM, which would falsely report a crash on every healthy start.
+    const alive = await exec.exec("sudo", ["kill", "-0", String(pid)], {
+        ignoreReturnCode: true,
+        silent: true,
+    });
+    if (alive === 0) {
         core.info(`kntrl agent started (pid: ${pid})`);
     }
-    catch {
+    else {
         core.error("kntrl agent failed to start. Log output:");
         if (fs.existsSync(LOG_FILE)) {
             core.info(fs.readFileSync(LOG_FILE, "utf-8"));
@@ -25810,14 +25816,15 @@ async function stopDaemon() {
             await exec.exec("sudo", ["kill", pid], { ignoreReturnCode: true });
             // Poll up to 5 seconds waiting for the process to exit.
             // kntrl flushes the JSONL report file on SIGTERM before exiting.
+            // Must use `sudo kill -0` — kntrl runs as root, and a non-root probe
+            // returns EPERM (exit code 1), which would falsely look like the process
+            // had already exited and break this loop on iteration zero.
             for (let i = 0; i < 10; i++) {
-                try {
-                    await exec.exec("kill", ["-0", pid], { ignoreReturnCode: false });
-                    await new Promise((resolve) => setTimeout(resolve, 500));
-                }
-                catch {
+                const stillAlive = await exec.exec("sudo", ["kill", "-0", pid], { ignoreReturnCode: true, silent: true });
+                if (stillAlive !== 0) {
                     break; // Process is gone — shutdown complete
                 }
+                await new Promise((resolve) => setTimeout(resolve, 500));
             }
         }
         // Clean up PID file
